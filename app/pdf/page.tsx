@@ -2,7 +2,14 @@
 
 import Link from "next/link";
 import { useCallback, useRef, useState } from "react";
-import { downloadUrl, getStatus, Job, JobStatus, OutputFormat, uploadImages } from "@/lib/api";
+import {
+  CompressionLevel,
+  getPdfStatus,
+  JobStatus,
+  PdfJob,
+  pdfDownloadUrl,
+  uploadPdfs,
+} from "@/lib/api";
 
 const STATUS_STYLE: Record<JobStatus, string> = {
   pending: "bg-yellow-100 text-yellow-700",
@@ -15,6 +22,13 @@ const STATUS_STYLE: Record<JobStatus, string> = {
 
 const TERMINAL: Set<JobStatus> = new Set(["ready", "downloaded", "failed", "expired"]);
 
+const LEVELS: { value: CompressionLevel; label: string }[] = [
+  { value: "screen", label: "Screen — smallest (72 dpi)" },
+  { value: "ebook", label: "eBook — balanced (150 dpi)" },
+  { value: "printer", label: "Printer — high quality (300 dpi)" },
+  { value: "lossless", label: "Lossless — no image downsampling" },
+];
+
 function fmt(bytes: number | null): string {
   if (!bytes) return "—";
   if (bytes < 1024) return `${bytes} B`;
@@ -22,12 +36,11 @@ function fmt(bytes: number | null): string {
   return `${(bytes / 1024 ** 2).toFixed(2)} MB`;
 }
 
-export default function Home() {
+export default function PdfPage() {
   const [pending, setPending] = useState<File[]>([]);
-  const [format, setFormat] = useState<OutputFormat>("webp");
-  const [width, setWidth] = useState("");
+  const [level, setLevel] = useState<CompressionLevel>("ebook");
   const [uploading, setUploading] = useState(false);
-  const [jobs, setJobs] = useState<Job[]>([]);
+  const [jobs, setJobs] = useState<PdfJob[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [dragging, setDragging] = useState(false);
 
@@ -35,14 +48,16 @@ export default function Home() {
   const pollers = useRef<Map<string, ReturnType<typeof setInterval>>>(new Map());
 
   const addFiles = (list: FileList | File[]) => {
-    const imgs = Array.from(list).filter((f) => f.type.startsWith("image/"));
-    setPending((p) => [...p, ...imgs]);
+    const pdfs = Array.from(list).filter(
+      (f) => f.type === "application/pdf" || f.name.toLowerCase().endsWith(".pdf")
+    );
+    setPending((p) => [...p, ...pdfs]);
   };
 
   const startPolling = useCallback((jobId: string) => {
     const timer = setInterval(async () => {
       try {
-        const updated = await getStatus(jobId);
+        const updated = await getPdfStatus(jobId);
         setJobs((prev) => prev.map((j) => (j.id === jobId ? updated : j)));
         if (TERMINAL.has(updated.status)) {
           clearInterval(timer);
@@ -61,12 +76,10 @@ export default function Home() {
     setError(null);
     setUploading(true);
     try {
-      const w = width ? parseInt(width, 10) : null;
-      const res = await uploadImages(pending, format, w);
+      const res = await uploadPdfs(pending, level);
       setJobs((prev) => [...res.jobs, ...prev]);
       res.jobs.forEach((j) => startPolling(j.id));
       setPending([]);
-      setWidth("");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Upload failed");
     } finally {
@@ -76,7 +89,7 @@ export default function Home() {
 
   const handleDownload = (jobId: string) => {
     const a = document.createElement("a");
-    a.href = downloadUrl(jobId);
+    a.href = pdfDownloadUrl(jobId);
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
@@ -90,16 +103,16 @@ export default function Home() {
       <div className="max-w-2xl mx-auto px-4 py-14">
         {/* Nav */}
         <nav className="mb-6 flex gap-4 text-sm">
-          <span className="font-semibold text-gray-900">Images</span>
-          <Link href="/pdf" className="text-gray-500 hover:text-gray-900">
-            PDF
+          <Link href="/" className="text-gray-500 hover:text-gray-900">
+            Images
           </Link>
+          <span className="font-semibold text-gray-900">PDF</span>
         </nav>
 
         {/* Header */}
-        <h1 className="text-3xl font-bold text-gray-900">Image Optimizer</h1>
+        <h1 className="text-3xl font-bold text-gray-900">PDF Compressor</h1>
         <p className="mt-1 text-gray-500 text-sm">
-          Convert to WebP / AVIF, resize, and compress. Files auto-delete after download.
+          Shrink PDF file size with selectable quality. Files auto-delete after download.
         </p>
 
         {/* Drop zone */}
@@ -117,15 +130,15 @@ export default function Home() {
           <input
             ref={inputRef}
             type="file"
-            accept="image/*"
+            accept="application/pdf,.pdf"
             multiple
             className="hidden"
             onChange={(e) => e.target.files && addFiles(e.target.files)}
           />
           <p className="text-gray-500 text-sm">
             {pending.length
-              ? `${pending.length} image${pending.length !== 1 ? "s" : ""} ready`
-              : "Drop images here or click to select"}
+              ? `${pending.length} PDF${pending.length !== 1 ? "s" : ""} ready`
+              : "Drop PDFs here or click to select"}
           </p>
           {pending.length > 0 && (
             <p className="mt-1 text-xs text-gray-400 truncate">
@@ -137,31 +150,18 @@ export default function Home() {
         {/* Options */}
         <div className="mt-4 flex flex-wrap items-end gap-3">
           <div>
-            <label className="block text-xs font-medium text-gray-600 mb-1">Format</label>
+            <label className="block text-xs font-medium text-gray-600 mb-1">Compression</label>
             <select
-              value={format}
-              onChange={(e) => setFormat(e.target.value as OutputFormat)}
+              value={level}
+              onChange={(e) => setLevel(e.target.value as CompressionLevel)}
               className="border border-gray-300 rounded-lg px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-500"
             >
-              <option value="webp">WebP</option>
-              <option value="avif">AVIF</option>
-              <option value="original">Original (optimize only)</option>
+              {LEVELS.map((l) => (
+                <option key={l.value} value={l.value}>
+                  {l.label}
+                </option>
+              ))}
             </select>
-          </div>
-
-          <div>
-            <label className="block text-xs font-medium text-gray-600 mb-1">
-              Width <span className="font-normal text-gray-400">(px, optional)</span>
-            </label>
-            <input
-              type="number"
-              min={1}
-              max={10000}
-              placeholder="e.g. 1280"
-              value={width}
-              onChange={(e) => setWidth(e.target.value)}
-              className="border border-gray-300 rounded-lg px-3 py-2 text-sm w-32 focus:outline-none focus:ring-2 focus:ring-blue-500"
-            />
           </div>
 
           <button
@@ -169,7 +169,7 @@ export default function Home() {
             disabled={!pending.length || uploading}
             className="bg-blue-600 hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed text-white text-sm font-medium px-5 py-2 rounded-lg transition-colors"
           >
-            {uploading ? "Uploading…" : "Optimize"}
+            {uploading ? "Uploading…" : "Compress"}
           </button>
         </div>
 
@@ -204,7 +204,7 @@ export default function Home() {
                           )}
                         </>
                       )}
-                      {job.resize_width && <span>· {job.resize_width}px wide</span>}
+                      <span>· {job.compression_level}</span>
                     </div>
                     {job.error_message && (
                       <p className="text-xs text-red-500 mt-1">{job.error_message}</p>
