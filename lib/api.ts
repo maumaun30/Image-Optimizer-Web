@@ -9,6 +9,7 @@ export interface Job {
   status: JobStatus;
   output_format: OutputFormat;
   resize_width: number | null;
+  quality: number | null;
   original_size_bytes: number | null;
   processed_size_bytes: number | null;
   savings_percent: number | null;
@@ -25,9 +26,10 @@ export interface UploadResponse {
 export async function uploadImages(
   files: File[],
   format: OutputFormat,
-  width: number | null
+  width: number | null,
+  quality: number
 ): Promise<UploadResponse> {
-  const params = new URLSearchParams({ format });
+  const params = new URLSearchParams({ format, quality: String(quality) });
   if (width) params.set("width", String(width));
 
   const body = new FormData();

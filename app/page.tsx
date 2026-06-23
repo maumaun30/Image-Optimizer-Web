@@ -25,6 +25,7 @@ export default function Home() {
   const [pending, setPending] = useState<File[]>([]);
   const [format, setFormat] = useState<OutputFormat>("webp");
   const [width, setWidth] = useState("");
+  const [quality, setQuality] = useState(85);
   const [uploading, setUploading] = useState(false);
   const [jobs, setJobs] = useState<Job[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -61,7 +62,7 @@ export default function Home() {
     setUploading(true);
     try {
       const w = width ? parseInt(width, 10) : null;
-      const res = await uploadImages(pending, format, w);
+      const res = await uploadImages(pending, format, w, quality);
       setJobs((prev) => [...res.jobs, ...prev]);
       res.jobs.forEach((j) => startPolling(j.id));
       setPending([]);
@@ -164,6 +165,32 @@ export default function Home() {
           </button>
         </div>
 
+        {/* Quality slider */}
+        <div className="mt-4">
+          <div className="flex items-center justify-between mb-1">
+            <label htmlFor="quality" className="text-xs font-medium text-gray-600">
+              Quality
+            </label>
+            <span className="text-xs font-semibold text-gray-700">
+              {quality === 100 ? "Lossless" : `${quality}%`}
+            </span>
+          </div>
+          <input
+            id="quality"
+            type="range"
+            min={50}
+            max={100}
+            step={1}
+            value={quality}
+            onChange={(e) => setQuality(parseInt(e.target.value, 10))}
+            className="w-full accent-blue-600 cursor-pointer"
+          />
+          <div className="flex justify-between text-[10px] text-gray-400 mt-0.5">
+            <span>Smaller file (50%)</span>
+            <span>Lossless</span>
+          </div>
+        </div>
+
         {error && <p className="mt-2 text-sm text-red-600">{error}</p>}
 
         {/* Job list */}
@@ -196,6 +223,9 @@ export default function Home() {
                         </>
                       )}
                       {job.resize_width && <span>· {job.resize_width}px wide</span>}
+                      {job.quality != null && (
+                        <span>· {job.quality === 100 ? "lossless" : `q${job.quality}`}</span>
+                      )}
                     </div>
                     {job.error_message && (
                       <p className="text-xs text-red-500 mt-1">{job.error_message}</p>
