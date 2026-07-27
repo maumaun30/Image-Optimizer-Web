@@ -95,6 +95,9 @@ export default function Home() {
           <Link href="/pdf" className="text-gray-500 hover:text-gray-900">
             PDF
           </Link>
+          <Link href="/video" className="text-gray-500 hover:text-gray-900">
+            Video
+          </Link>
         </nav>
 
         {/* Header */}

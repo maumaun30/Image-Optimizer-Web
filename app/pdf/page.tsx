@@ -107,6 +107,9 @@ export default function PdfPage() {
             Images
           </Link>
           <span className="font-semibold text-gray-900">PDF</span>
+          <Link href="/video" className="text-gray-500 hover:text-gray-900">
+            Video
+          </Link>
         </nav>
 
         {/* Header */}
