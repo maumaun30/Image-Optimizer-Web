@@ -16,6 +16,8 @@ export interface Job {
   error_message: string | null;
   created_at: string;
   processed_at: string | null;
+  /** Set on rows produced by the in-browser pipeline; absent on API responses. */
+  local?: boolean;
 }
 
 export interface UploadResponse {
@@ -125,6 +127,8 @@ export interface VideoJob {
   error_message: string | null;
   created_at: string;
   processed_at: string | null;
+  /** Set on rows produced by the in-browser encoder; absent on API responses. */
+  local?: boolean;
 }
 
 export interface VideoUploadResponse {

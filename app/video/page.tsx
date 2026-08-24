@@ -11,6 +11,8 @@ import {
   VideoJob,
   VideoPreset,
 } from "@/lib/api";
+import { canEncodeLocally } from "@/lib/videoSupport";
+import { encodeVideoLocally, LocalVideoResult } from "@/lib/clientVideo";
 
 const STATUS_STYLE: Record<JobStatus, string> = {
   pending: "bg-yellow-100 text-yellow-700",
@@ -54,6 +56,15 @@ function fmtEta(seconds: number): string {
   if (seconds < 60) return `~${Math.max(1, Math.round(seconds))}s left`;
   const m = Math.round(seconds / 60);
   return `~${m}m left`;
+}
+
+function triggerDownload(href: string, filename?: string) {
+  const a = document.createElement("a");
+  a.href = href;
+  if (filename) a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
 }
 
 /** Encode progress bar. Indeterminate while queued, striped while encoding. */
@@ -105,6 +116,9 @@ export default function VideoPage() {
   const [mute, setMute] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [uploadPercent, setUploadPercent] = useState(0);
+  // How many files of the current batch are going to the server; the upload bar is
+  // meaningless for a batch encoded entirely in the browser.
+  const [remoteCount, setRemoteCount] = useState(0);
   const [jobs, setJobs] = useState<VideoJob[]>([]);
   const [etas, setEtas] = useState<Record<string, number>>({});
   const [error, setError] = useState<string | null>(null);
@@ -114,6 +128,8 @@ export default function VideoPage() {
   const pollers = useRef<Map<string, ReturnType<typeof setInterval>>>(new Map());
   // First moment a job reported real progress, used to extrapolate a finish time
   const encodeStart = useRef<Map<string, number>>(new Map());
+  /** Output of locally-encoded jobs, held until the user downloads it. */
+  const blobs = useRef<Map<string, LocalVideoResult>>(new Map());
 
   const addFiles = (list: FileList | File[]) => {
     const videos = Array.from(list).filter(
@@ -153,38 +169,157 @@ export default function VideoPage() {
     pollers.current.set(jobId, timer);
   }, []);
 
-  const handleUpload = async () => {
-    if (!pending.length) return;
-    setError(null);
-    setUploading(true);
-    setUploadPercent(0);
-    try {
-      const w = width ? parseInt(width, 10) : null;
+  const sendToServer = useCallback(
+    async (files: File[], w: number | null) => {
       const res = await uploadVideos(
-        pending,
+        files,
         { preset, codec, width: w, mute },
         setUploadPercent
       );
       setJobs((prev) => [...res.jobs, ...prev]);
       res.jobs.forEach((j) => startPolling(j.id));
-      setPending([]);
-      setWidth("");
+    },
+    [codec, mute, preset, startPolling]
+  );
+
+  /**
+   * A local encode that fails gets one retry against the API. The placeholder row is
+   * swapped for the real server job so the user sees one entry, not two.
+   */
+  const fallbackToServer = useCallback(
+    async (localId: string, file: File, w: number | null) => {
+      try {
+        const res = await uploadVideos([file], { preset, codec, width: w, mute });
+        const job = res.jobs[0];
+        if (!job) throw new Error("Server returned no job");
+        setJobs((prev) => prev.map((j) => (j.id === localId ? job : j)));
+        startPolling(job.id);
+      } catch (e) {
+        const message = e instanceof Error ? e.message : "Encoding failed";
+        setJobs((prev) =>
+          prev.map((j) =>
+            j.id === localId
+              ? { ...j, status: "failed" as JobStatus, error_message: message }
+              : j
+          )
+        );
+      }
+    },
+    [codec, mute, preset, startPolling]
+  );
+
+  const runLocal = useCallback(
+    async (file: File, w: number | null) => {
+      const id = crypto.randomUUID();
+      const row: VideoJob = {
+        id,
+        original_filename: file.name,
+        status: "processing",
+        preset,
+        codec,
+        target_width: w,
+        mute,
+        duration_seconds: null,
+        progress_percent: 0,
+        original_size_bytes: file.size,
+        processed_size_bytes: null,
+        savings_percent: null,
+        error_message: null,
+        created_at: new Date().toISOString(),
+        processed_at: null,
+        local: true,
+      };
+      setJobs((prev) => [row, ...prev]);
+
+      const onProgress = (percent: number) => {
+        setJobs((prev) =>
+          prev.map((j) => (j.id === id ? { ...j, progress_percent: percent } : j))
+        );
+        // Same linear extrapolation the server-polling path uses.
+        const started = encodeStart.current.get(id);
+        if (started == null) {
+          encodeStart.current.set(id, Date.now());
+        } else if (percent > 0) {
+          const elapsed = (Date.now() - started) / 1000;
+          setEtas((p) => ({ ...p, [id]: (elapsed / percent) * (100 - percent) }));
+        }
+      };
+
+      try {
+        const result = await encodeVideoLocally(file, { codec, preset, width: w, mute }, onProgress);
+        blobs.current.set(id, result);
+        setJobs((prev) =>
+          prev.map((j) =>
+            j.id === id
+              ? {
+                  ...j,
+                  status: "ready" as JobStatus,
+                  progress_percent: 100,
+                  processed_size_bytes: result.blob.size,
+                  savings_percent: file.size
+                    ? Math.round((1 - result.blob.size / file.size) * 100)
+                    : 0,
+                  // The API stores whole seconds; round so both paths render alike.
+                  duration_seconds:
+                    result.durationSeconds == null ? null : Math.round(result.durationSeconds),
+                  processed_at: new Date().toISOString(),
+                }
+              : j
+          )
+        );
+      } catch {
+        await fallbackToServer(id, file, w);
+      } finally {
+        encodeStart.current.delete(id);
+      }
+    },
+    [codec, fallbackToServer, mute, preset]
+  );
+
+  const handleUpload = async () => {
+    if (!pending.length) return;
+    setError(null);
+    setUploadPercent(0);
+
+    const files = pending;
+    const w = width ? parseInt(width, 10) : null;
+    setPending([]);
+    setWidth("");
+
+    // Files this browser can encode never leave the device; the rest go to the API.
+    const local = files.filter((f) => canEncodeLocally(f, codec));
+    const remote = files.filter((f) => !canEncodeLocally(f, codec));
+
+    setRemoteCount(remote.length);
+    setUploading(true);
+    try {
+      await Promise.all([
+        ...(remote.length ? [sendToServer(remote, w)] : []),
+        ...local.map((f) => runLocal(f, w)),
+      ]);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Upload failed");
     } finally {
       setUploading(false);
       setUploadPercent(0);
+      setRemoteCount(0);
     }
   };
 
-  const handleDownload = (jobId: string) => {
-    const a = document.createElement("a");
-    a.href = videoDownloadUrl(jobId);
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
+  const handleDownload = (job: VideoJob) => {
+    if (job.local) {
+      const result = blobs.current.get(job.id);
+      if (!result) return;
+      const url = URL.createObjectURL(result.blob);
+      triggerDownload(url, result.filename);
+      // Mirrors the server's one-time download: the output is released afterwards.
+      blobs.current.delete(job.id);
+      setTimeout(() => URL.revokeObjectURL(url), 60_000);
+    } else {
+      triggerDownload(videoDownloadUrl(job.id));
+    }
     setJobs((prev) =>
-      prev.map((j) => (j.id === jobId ? { ...j, status: "downloaded" as JobStatus } : j))
+      prev.map((j) => (j.id === job.id ? { ...j, status: "downloaded" as JobStatus } : j))
     );
   };
 
@@ -207,8 +342,9 @@ export default function VideoPage() {
         {/* Header */}
         <h1 className="text-3xl font-bold text-gray-900">Video Compressor</h1>
         <p className="mt-1 text-gray-500 text-sm">
-          Re-encode video to a smaller file. Up to 5 files, 2 GB each. Files auto-delete
-          after download.
+          Re-encode video to a smaller file. Up to 2 GB each. Encoded on your device where
+          your browser supports it — nothing to upload — otherwise on the server, where
+          files auto-delete after download.
         </p>
 
         {/* Drop zone */}
@@ -305,16 +441,16 @@ export default function VideoPage() {
             disabled={!pending.length || uploading}
             className="bg-blue-600 hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed text-white text-sm font-medium px-5 py-2 rounded-lg transition-colors"
           >
-            {uploading ? "Uploading…" : "Compress"}
+            {uploading ? "Working…" : "Compress"}
           </button>
         </div>
 
         {/* Upload progress — separate from encode progress; gigabyte uploads take a while */}
-        {uploading && (
+        {uploading && remoteCount > 0 && (
           <div className="mt-4">
             <div className="flex items-center justify-between mb-1">
               <span className="text-xs font-medium text-gray-600">
-                Uploading {pending.length} file{pending.length !== 1 ? "s" : ""}
+                Uploading {remoteCount} file{remoteCount !== 1 ? "s" : ""}
               </span>
               <span className="text-xs font-semibold text-gray-700">{uploadPercent}%</span>
             </div>
@@ -376,6 +512,9 @@ export default function VideoPage() {
                         {job.duration_seconds != null && (
                           <span>· {fmtDuration(job.duration_seconds)}</span>
                         )}
+                        {job.local && (
+                          <span className="text-blue-600 font-medium">· in your browser</span>
+                        )}
                       </div>
                       {job.error_message && (
                         <p className="text-xs text-red-500 mt-1">{job.error_message}</p>
@@ -390,7 +529,7 @@ export default function VideoPage() {
                       </span>
                       {job.status === "ready" && (
                         <button
-                          onClick={() => handleDownload(job.id)}
+                          onClick={() => handleDownload(job)}
                           className="text-xs text-blue-600 hover:text-blue-800 font-semibold underline"
                         >
                           Download
