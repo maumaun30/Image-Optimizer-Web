@@ -3,6 +3,8 @@
 import Link from "next/link";
 import { useCallback, useRef, useState } from "react";
 import { downloadUrl, getStatus, Job, JobStatus, OutputFormat, uploadImages } from "@/lib/api";
+import { canCompressLocally } from "@/lib/codecSupport";
+import { compressLocally, LocalResult } from "@/lib/clientCompress";
 
 const STATUS_STYLE: Record<JobStatus, string> = {
   pending: "bg-yellow-100 text-yellow-700",
@@ -22,6 +24,15 @@ function fmt(bytes: number | null): string {
   return `${(bytes / 1024 ** 2).toFixed(2)} MB`;
 }
 
+function triggerDownload(href: string, filename?: string) {
+  const a = document.createElement("a");
+  a.href = href;
+  if (filename) a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+}
+
 export default function Home() {
   const [pending, setPending] = useState<File[]>([]);
   const [format, setFormat] = useState<OutputFormat>("webp");
@@ -34,6 +45,8 @@ export default function Home() {
 
   const inputRef = useRef<HTMLInputElement>(null);
   const pollers = useRef<Map<string, ReturnType<typeof setInterval>>>(new Map());
+  /** Output of locally-compressed jobs, held until the user downloads it. */
+  const blobs = useRef<Map<string, LocalResult>>(new Map());
 
   const addFiles = (list: FileList | File[]) => {
     const imgs = Array.from(list).filter((f) => f.type.startsWith("image/"));
@@ -57,17 +70,105 @@ export default function Home() {
     pollers.current.set(jobId, timer);
   }, []);
 
+  const sendToServer = useCallback(
+    async (files: File[], w: number | null) => {
+      const res = await uploadImages(files, format, w, quality);
+      setJobs((prev) => [...res.jobs, ...prev]);
+      res.jobs.forEach((j) => startPolling(j.id));
+    },
+    [format, quality, startPolling]
+  );
+
+  /**
+   * A local job that fails gets one retry against the API. The placeholder row is
+   * swapped for the real server job so the user sees one entry, not two.
+   */
+  const fallbackToServer = useCallback(
+    async (localId: string, file: File, w: number | null) => {
+      try {
+        const res = await uploadImages([file], format, w, quality);
+        const job = res.jobs[0];
+        if (!job) throw new Error("Server returned no job");
+        setJobs((prev) => prev.map((j) => (j.id === localId ? job : j)));
+        startPolling(job.id);
+      } catch (e) {
+        const message = e instanceof Error ? e.message : "Compression failed";
+        setJobs((prev) =>
+          prev.map((j) =>
+            j.id === localId
+              ? { ...j, status: "failed" as JobStatus, error_message: message }
+              : j
+          )
+        );
+      }
+    },
+    [format, quality, startPolling]
+  );
+
+  const runLocal = useCallback(
+    async (file: File, w: number | null) => {
+      const id = crypto.randomUUID();
+      const row: Job = {
+        id,
+        original_filename: file.name,
+        status: "processing",
+        output_format: format,
+        resize_width: w,
+        quality,
+        original_size_bytes: file.size,
+        processed_size_bytes: null,
+        savings_percent: null,
+        error_message: null,
+        created_at: new Date().toISOString(),
+        processed_at: null,
+        local: true,
+      };
+      setJobs((prev) => [row, ...prev]);
+
+      try {
+        const result = await compressLocally(file, { format, width: w, quality });
+        blobs.current.set(id, result);
+        setJobs((prev) =>
+          prev.map((j) =>
+            j.id === id
+              ? {
+                  ...j,
+                  status: "ready" as JobStatus,
+                  processed_size_bytes: result.blob.size,
+                  savings_percent: file.size
+                    ? Math.round((1 - result.blob.size / file.size) * 100)
+                    : 0,
+                  processed_at: new Date().toISOString(),
+                }
+              : j
+          )
+        );
+      } catch {
+        await fallbackToServer(id, file, w);
+      }
+    },
+    [fallbackToServer, format, quality]
+  );
+
   const handleUpload = async () => {
     if (!pending.length) return;
     setError(null);
     setUploading(true);
+
+    const files = pending;
+    const w = width ? parseInt(width, 10) : null;
+    setPending([]);
+    setWidth("");
+
+    // Files the browser can handle never leave the device; the rest go to the API.
+    const local = files.filter((f) => canCompressLocally(f, format));
+    const remote = files.filter((f) => !canCompressLocally(f, format));
+
     try {
-      const w = width ? parseInt(width, 10) : null;
-      const res = await uploadImages(pending, format, w, quality);
-      setJobs((prev) => [...res.jobs, ...prev]);
-      res.jobs.forEach((j) => startPolling(j.id));
-      setPending([]);
-      setWidth("");
+      await Promise.all([
+        ...(remote.length ? [sendToServer(remote, w)] : []),
+        ...local.map((f) => runLocal(f, w)),
+      ]);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Upload failed");
     } finally {
@@ -75,14 +176,20 @@ export default function Home() {
     }
   };
 
-  const handleDownload = (jobId: string) => {
-    const a = document.createElement("a");
-    a.href = downloadUrl(jobId);
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
+  const handleDownload = (job: Job) => {
+    if (job.local) {
+      const result = blobs.current.get(job.id);
+      if (!result) return;
+      const url = URL.createObjectURL(result.blob);
+      triggerDownload(url, result.filename);
+      // Mirrors the server's one-time download: the output is released afterwards.
+      blobs.current.delete(job.id);
+      setTimeout(() => URL.revokeObjectURL(url), 60_000);
+    } else {
+      triggerDownload(downloadUrl(job.id));
+    }
     setJobs((prev) =>
-      prev.map((j) => (j.id === jobId ? { ...j, status: "downloaded" as JobStatus } : j))
+      prev.map((j) => (j.id === job.id ? { ...j, status: "downloaded" as JobStatus } : j))
     );
   };
 
@@ -103,7 +210,9 @@ export default function Home() {
         {/* Header */}
         <h1 className="text-3xl font-bold text-gray-900">Image Optimizer</h1>
         <p className="mt-1 text-gray-500 text-sm">
-          Convert to WebP / AVIF, resize, and compress. Files auto-delete after download.
+          Convert to WebP / AVIF, resize, and compress. Processed on your device where
+          your browser supports it — otherwise on the server, where files auto-delete after
+          download.
         </p>
 
         {/* Drop zone */}
@@ -238,6 +347,9 @@ export default function Home() {
                       {job.quality != null && (
                         <span>· {job.quality === 100 ? "lossless" : `q${job.quality}`}</span>
                       )}
+                      {job.local && (
+                        <span className="text-blue-600 font-medium">· in your browser</span>
+                      )}
                     </div>
                     {job.error_message && (
                       <p className="text-xs text-red-500 mt-1">{job.error_message}</p>
@@ -252,7 +364,7 @@ export default function Home() {
                     </span>
                     {job.status === "ready" && (
                       <button
-                        onClick={() => handleDownload(job.id)}
+                        onClick={() => handleDownload(job)}
                         className="text-xs text-blue-600 hover:text-blue-800 font-semibold underline"
                       >
                         Download
