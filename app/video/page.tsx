@@ -267,7 +267,10 @@ export default function VideoPage() {
               : j
           )
         );
-      } catch {
+      } catch (e) {
+        // Why a file fell back is invisible in the UI by design, but it is the first
+        // thing worth knowing when the browser path underperforms.
+        console.warn(`[video] browser encode failed for ${file.name}, using API:`, e);
         await fallbackToServer(id, file, w);
       } finally {
         encodeStart.current.delete(id);
