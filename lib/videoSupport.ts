@@ -26,11 +26,25 @@ export const CONTAINER: Record<VideoCodec, { extension: string; mimeType: string
   av1: { extension: ".mp4", mimeType: "video/mp4" },
 };
 
+/** Matches the server's `_AUDIO_BITRATE` table in `app/services/video_processor.py`. */
 export const AUDIO_BITRATE: Record<VideoPreset, number> = {
   low: 64_000,
   balanced: 96_000,
   high: 128_000,
 };
+
+/**
+ * Chrome's AAC encoder rejects the `low` preset's 64 kbps outright — the whole encode
+ * fails with "Encoding error." — where ffmpeg's aac encoder accepts it happily. 96 kbps
+ * is the lowest value observed to configure, so AAC is floored there. Opus has no such
+ * problem and keeps server parity at every preset.
+ */
+const AAC_MIN_BITRATE = 96_000;
+
+export function audioBitrate(codec: VideoCodec, preset: VideoPreset): number {
+  const bitrate = AUDIO_BITRATE[preset];
+  return codec === "vp9" ? bitrate : Math.max(bitrate, AAC_MIN_BITRATE);
+}
 
 /**
  * Bits per pixel per frame. Calibrated against server output at 1080p30: the server's
