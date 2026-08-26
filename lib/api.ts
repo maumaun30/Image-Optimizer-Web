@@ -1,5 +1,17 @@
 const API_BASE = (process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000").replace(/\/$/, "");
 
+/**
+ * Video uploads only. Cloudflare caps request bodies well below the app's own limit
+ * (100 MB on Free/Pro), and a multi-gigabyte POST is cut off mid-body — the browser
+ * reports ERR_CONNECTION_RESET. Point this at a hostname that bypasses the proxy and
+ * reaches the origin directly. Everything else keeps going through API_BASE, so the
+ * proxy still fronts the rest of the API.
+ *
+ * Falls back to API_BASE when unset, which is the right behaviour for local dev and
+ * for any deployment without a proxy in front.
+ */
+const UPLOAD_BASE = (process.env.NEXT_PUBLIC_UPLOAD_URL || API_BASE).replace(/\/$/, "");
+
 export type JobStatus = "pending" | "processing" | "ready" | "downloaded" | "failed" | "expired";
 export type OutputFormat = "webp" | "avif" | "original";
 
@@ -170,7 +182,7 @@ export function uploadVideos(
 
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
-    xhr.open("POST", `${API_BASE}/video/upload?${params}`);
+    xhr.open("POST", `${UPLOAD_BASE}/video/upload?${params}`);
 
     xhr.upload.onprogress = (e) => {
       if (e.lengthComputable && onUploadProgress) {
