@@ -129,6 +129,12 @@ export interface VideoJob {
   processed_at: string | null;
   /** Set on rows produced by the in-browser encoder; absent on API responses. */
   local?: boolean;
+  /**
+   * Why this file was sent to the server after the browser path declined it. Set
+   * client-side only; absent on API responses and on files that were never tried
+   * locally.
+   */
+  fallback_reason?: string;
 }
 
 export interface VideoUploadResponse {

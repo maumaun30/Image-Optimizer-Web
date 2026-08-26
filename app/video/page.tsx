@@ -37,6 +37,20 @@ const CODECS: { value: VideoCodec; label: string }[] = [
   { value: "av1", label: "AV1 — smallest, much slower" },
 ];
 
+/**
+ * Turns an encoder error into something short enough to sit on a job row. The full
+ * message still goes to the console; this is the one-liner that explains why a file
+ * the browser was supposed to handle went to the server instead.
+ */
+function fallbackReason(e: unknown): string {
+  const message = e instanceof Error ? e.message : "";
+  const undecodable = /cannot decode (\S+)/i.exec(message);
+  if (undecodable) return `${undecodable[1].toUpperCase()} can't be decoded by the browser`;
+  if (/cannot encode/i.test(message)) return "browser can't encode this size or codec";
+  if (/no video (stream|track)/i.test(message)) return "no usable video track in the browser";
+  return "browser encode failed";
+}
+
 function fmt(bytes: number | null): string {
   if (!bytes) return "—";
   if (bytes < 1024) return `${bytes} B`;
@@ -187,12 +201,14 @@ export default function VideoPage() {
    * swapped for the real server job so the user sees one entry, not two.
    */
   const fallbackToServer = useCallback(
-    async (localId: string, file: File, w: number | null) => {
+    async (localId: string, file: File, w: number | null, reason: string) => {
       try {
         const res = await uploadVideos([file], { preset, codec, width: w, mute });
         const job = res.jobs[0];
         if (!job) throw new Error("Server returned no job");
-        setJobs((prev) => prev.map((j) => (j.id === localId ? job : j)));
+        setJobs((prev) =>
+          prev.map((j) => (j.id === localId ? { ...job, fallback_reason: reason } : j))
+        );
         startPolling(job.id);
       } catch (e) {
         const message = e instanceof Error ? e.message : "Encoding failed";
@@ -271,7 +287,7 @@ export default function VideoPage() {
         // Why a file fell back is invisible in the UI by design, but it is the first
         // thing worth knowing when the browser path underperforms.
         console.warn(`[video] browser encode failed for ${file.name}, using API:`, e);
-        await fallbackToServer(id, file, w);
+        await fallbackToServer(id, file, w, fallbackReason(e));
       } finally {
         encodeStart.current.delete(id);
       }
@@ -381,6 +397,12 @@ export default function VideoPage() {
             </p>
           )}
         </div>
+
+        <p className="mt-2 text-xs text-gray-400">
+          H.264, HEVC, VP9 and AV1 sources compress in your browser. Camera and edit
+          formats the browser cannot decode — ProRes, DNxHD, uncompressed — and files
+          over 2 GB are uploaded to the server instead, which is slower.
+        </p>
 
         {/* Options */}
         <div className="mt-4 flex flex-wrap items-end gap-3">
@@ -517,6 +539,11 @@ export default function VideoPage() {
                         )}
                         {job.local && (
                           <span className="text-blue-600 font-medium">· in your browser</span>
+                        )}
+                        {job.fallback_reason && (
+                          <span className="text-amber-600 font-medium">
+                            · on server — {job.fallback_reason}
+                          </span>
                         )}
                       </div>
                       {job.error_message && (
