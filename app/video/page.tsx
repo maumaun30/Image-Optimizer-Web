@@ -6,13 +6,13 @@ import { useCallback, useMemo, useRef, useState } from "react";
 import {
   getVideoStatus,
   JobStatus,
-  uploadVideos,
   VideoCodec,
   videoDownloadUrl,
   VideoJob,
   VideoPreset,
 } from "@/lib/api";
 import { canEncodeLocally } from "@/lib/videoSupport";
+import { UploadCancelled, uploadVideoResumable, type ResumableUpload } from "@/lib/resumableUpload";
 import { encodeVideoLocally, LocalVideoResult } from "@/lib/clientVideo";
 import { fmtDuration, triggerDownload } from "@/lib/format";
 import {
@@ -49,6 +49,20 @@ const CODECS: { value: VideoCodec; title: string; description: string }[] = [
 const CODEC_LABEL: Record<VideoCodec, string> = { h264: "H.264", vp9: "VP9", av1: "AV1" };
 const PRESET_LABEL: Record<VideoPreset, string> = { low: "Low", balanced: "Balanced", high: "High" };
 
+interface RemoteBatch {
+  count: number;
+  /** Position of the file uploading now, 0-based. */
+  index: number;
+  name: string;
+  /** Bytes on the server across the batch, and the batch's total. */
+  sent: number;
+  total: number;
+  /** Bytes that were already on the server from an earlier, interrupted attempt. */
+  resumed: number | null;
+}
+
+const NO_REMOTE: RemoteBatch = { count: 0, index: 0, name: "", sent: 0, total: 0, resumed: null };
+
 const isVideo = (f: File) =>
   f.type.startsWith("video/") || /\.(mp4|mov|m4v|mkv|webm|avi|wmv|flv|mpe?g|3gp|ts)$/i.test(f.name);
 
@@ -73,14 +87,9 @@ export default function VideoPage() {
   const [width, setWidth] = useState("");
   const [mute, setMute] = useState(false);
   const [uploading, setUploading] = useState(false);
-  const [uploadPercent, setUploadPercent] = useState(0);
   // The part of the current batch going to the server; the upload card is
   // meaningless for a batch encoded entirely in the browser.
-  const [remote, setRemote] = useState<{ count: number; bytes: number; name: string }>({
-    count: 0,
-    bytes: 0,
-    name: "",
-  });
+  const [remote, setRemote] = useState<RemoteBatch>(NO_REMOTE);
   const [jobs, setJobs] = useState<VideoJob[]>([]);
   const [etas, setEtas] = useState<Record<string, number>>({});
   const [error, setError] = useState<string | null>(null);
@@ -89,6 +98,9 @@ export default function VideoPage() {
   const encodeStart = useRef<Map<string, number>>(new Map());
   /** Output of locally-encoded jobs, held until the user downloads it. */
   const blobs = useRef<Map<string, LocalVideoResult>>(new Map());
+  /** The batch upload in flight, so Cancel can stop it. */
+  const activeUpload = useRef<ResumableUpload | null>(null);
+  const cancelledBatch = useRef(false);
 
   useEncodingFlag(jobs.some((j) => j.local && j.status === "processing"));
 
@@ -119,11 +131,36 @@ export default function VideoPage() {
       ),
   });
 
+  /**
+   * Upload the batch's server-bound files one at a time (resumable, in chunks), so
+   * each job appears and starts encoding as soon as its own upload finishes.
+   */
   const sendToServer = useCallback(
     async (files: File[], w: number | null) => {
-      const res = await uploadVideos(files, { preset, codec, width: w, mute }, setUploadPercent);
-      setJobs((prev) => [...res.jobs, ...prev]);
-      res.jobs.forEach((j) => startPolling(j.id));
+      const total = files.reduce((s, f) => s + f.size, 0);
+      let before = 0; // bytes of files already finished in this batch
+      for (const [i, file] of files.entries()) {
+        if (cancelledBatch.current) return;
+        setRemote((r) => ({ ...r, name: file.name, index: i }));
+        const upload = uploadVideoResumable(
+          file,
+          { preset, codec, width: w, mute },
+          (sent) => setRemote((r) => ({ ...r, sent: before + sent, total })),
+          (already) => setRemote((r) => ({ ...r, resumed: (r.resumed ?? 0) + already }))
+        );
+        activeUpload.current = upload;
+        try {
+          const job = await upload.done;
+          setJobs((prev) => [job, ...prev]);
+          startPolling(job.id);
+        } catch (e) {
+          if (e instanceof UploadCancelled) return;
+          throw e;
+        } finally {
+          activeUpload.current = null;
+        }
+        before += file.size;
+      }
     },
     [codec, mute, preset, startPolling]
   );
@@ -135,9 +172,7 @@ export default function VideoPage() {
   const fallbackToServer = useCallback(
     async (localId: string, file: File, w: number | null, reason: string) => {
       try {
-        const res = await uploadVideos([file], { preset, codec, width: w, mute });
-        const job = res.jobs[0];
-        if (!job) throw new Error("Server returned no job");
+        const job = await uploadVideoResumable(file, { preset, codec, width: w, mute }).done;
         setJobs((prev) => prev.map((j) => (j.id === localId ? { ...job, fallback_reason: reason } : j)));
         startPolling(job.id);
       } catch (e) {
@@ -222,7 +257,7 @@ export default function VideoPage() {
   const handleUpload = async () => {
     if (!pending.length) return;
     setError(null);
-    setUploadPercent(0);
+    cancelledBatch.current = false;
 
     const files = pending;
     const w = width ? parseInt(width, 10) : null;
@@ -234,9 +269,10 @@ export default function VideoPage() {
     const toServer = files.filter((f) => !canEncodeLocally(f, codec));
 
     setRemote({
+      ...NO_REMOTE,
       count: toServer.length,
-      bytes: toServer.reduce((s, f) => s + f.size, 0),
-      name: toServer.length === 1 ? toServer[0].name : `${toServer.length} files`,
+      total: toServer.reduce((s, f) => s + f.size, 0),
+      name: toServer[0]?.name ?? "",
     });
     setUploading(true);
     try {
@@ -248,9 +284,13 @@ export default function VideoPage() {
       setError(e instanceof Error ? e.message : "Upload failed");
     } finally {
       setUploading(false);
-      setUploadPercent(0);
-      setRemote({ count: 0, bytes: 0, name: "" });
+      setRemote(NO_REMOTE);
     }
+  };
+
+  const cancelUpload = () => {
+    cancelledBatch.current = true;
+    void activeUpload.current?.cancel();
   };
 
   const handleDownload = (job: VideoJob) => {
@@ -376,7 +416,17 @@ export default function VideoPage() {
       />
 
       {uploadingRemote && (
-        <UploadProgress label={`Uploading ${remote.name}`} percent={uploadPercent} totalBytes={remote.bytes} />
+        <UploadProgress
+          label={
+            remote.count > 1
+              ? `Uploading ${remote.name} (${remote.index + 1} of ${remote.count})`
+              : `Uploading ${remote.name}`
+          }
+          sentBytes={remote.sent}
+          totalBytes={remote.total}
+          resumedBytes={remote.resumed}
+          onCancel={cancelUpload}
+        />
       )}
     </ToolLayout>
   );
