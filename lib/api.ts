@@ -12,6 +12,50 @@ const API_BASE = (process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000").re
  */
 const UPLOAD_BASE = (process.env.NEXT_PUBLIC_UPLOAD_URL || API_BASE).replace(/\/$/, "");
 
+// ---- Auth ----
+//
+// The API keeps the Google sign-in session in an httpOnly cookie on the shared parent
+// domain, so every call just has to send credentials; no token is handled here.
+
+export interface User {
+  email: string;
+  name: string;
+  is_admin: boolean;
+}
+
+/** Fired when the API answers 401 mid-session, so the auth gate can ask for sign-in. */
+export const AUTH_EXPIRED_EVENT = "imageopt:auth-expired";
+
+function noteAuthFailure(status: number) {
+  if (status === 401 && typeof window !== "undefined") {
+    window.dispatchEvent(new Event(AUTH_EXPIRED_EVENT));
+  }
+}
+
+/** `fetch` against the API with the session cookie attached. */
+async function apiFetch(url: string, init?: RequestInit): Promise<Response> {
+  const res = await fetch(url, { ...init, credentials: "include" });
+  noteAuthFailure(res.status);
+  return res;
+}
+
+/** The signed-in user, or null when there is no valid session. */
+export async function getMe(): Promise<User | null> {
+  const res = await fetch(`${API_BASE}/auth/me`, { credentials: "include" });
+  if (res.status === 401) return null;
+  if (!res.ok) throw new Error(`Couldn't check sign-in (${res.status})`);
+  return res.json();
+}
+
+/** Full-page redirect target that starts Google sign-in and returns to `nextPath`. */
+export function loginUrl(nextPath: string): string {
+  return `${API_BASE}/auth/login?${new URLSearchParams({ next: nextPath })}`;
+}
+
+export async function logout(): Promise<void> {
+  await fetch(`${API_BASE}/auth/logout`, { method: "POST", credentials: "include" });
+}
+
 export type JobStatus = "pending" | "processing" | "ready" | "downloaded" | "failed" | "expired";
 export type OutputFormat = "webp" | "avif" | "original";
 
@@ -49,7 +93,7 @@ export async function uploadImages(
   const body = new FormData();
   files.forEach((f) => body.append("files", f));
 
-  const res = await fetch(`${API_BASE}/images/upload?${params}`, { method: "POST", body });
+  const res = await apiFetch(`${API_BASE}/images/upload?${params}`, { method: "POST", body });
 
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
@@ -59,7 +103,7 @@ export async function uploadImages(
 }
 
 export async function getStatus(jobId: string): Promise<Job> {
-  const res = await fetch(`${API_BASE}/images/status/${jobId}`);
+  const res = await apiFetch(`${API_BASE}/images/status/${jobId}`);
   if (!res.ok) throw new Error(`Status check failed (${res.status})`);
   return res.json();
 }
@@ -99,7 +143,7 @@ export async function uploadPdfs(
   const body = new FormData();
   files.forEach((f) => body.append("files", f));
 
-  const res = await fetch(`${API_BASE}/pdf/upload?${params}`, { method: "POST", body });
+  const res = await apiFetch(`${API_BASE}/pdf/upload?${params}`, { method: "POST", body });
 
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
@@ -109,7 +153,7 @@ export async function uploadPdfs(
 }
 
 export async function getPdfStatus(jobId: string): Promise<PdfJob> {
-  const res = await fetch(`${API_BASE}/pdf/status/${jobId}`);
+  const res = await apiFetch(`${API_BASE}/pdf/status/${jobId}`);
   if (!res.ok) throw new Error(`Status check failed (${res.status})`);
   return res.json();
 }
@@ -183,6 +227,8 @@ export function uploadVideos(
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     xhr.open("POST", `${UPLOAD_BASE}/video/upload?${params}`);
+    // Session cookie; the upload host must sit under the same parent domain as the API
+    xhr.withCredentials = true;
 
     xhr.upload.onprogress = (e) => {
       if (e.lengthComputable && onUploadProgress) {
@@ -191,6 +237,7 @@ export function uploadVideos(
     };
 
     xhr.onload = () => {
+      noteAuthFailure(xhr.status);
       let parsed: unknown;
       try {
         parsed = JSON.parse(xhr.responseText);
@@ -213,7 +260,7 @@ export function uploadVideos(
 }
 
 export async function getVideoStatus(jobId: string): Promise<VideoJob> {
-  const res = await fetch(`${API_BASE}/video/status/${jobId}`);
+  const res = await apiFetch(`${API_BASE}/video/status/${jobId}`);
   if (!res.ok) throw new Error(`Status check failed (${res.status})`);
   return res.json();
 }
