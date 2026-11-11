@@ -1,16 +1,4 @@
-const API_BASE = (process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000").replace(/\/$/, "");
-
-/**
- * Video uploads only. Cloudflare caps request bodies well below the app's own limit
- * (100 MB on Free/Pro), and a multi-gigabyte POST is cut off mid-body — the browser
- * reports ERR_CONNECTION_RESET. Point this at a hostname that bypasses the proxy and
- * reaches the origin directly. Everything else keeps going through API_BASE, so the
- * proxy still fronts the rest of the API.
- *
- * Falls back to API_BASE when unset, which is the right behaviour for local dev and
- * for any deployment without a proxy in front.
- */
-const UPLOAD_BASE = (process.env.NEXT_PUBLIC_UPLOAD_URL || API_BASE).replace(/\/$/, "");
+export const API_BASE = (process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000").replace(/\/$/, "");
 
 // ---- Auth ----
 //
@@ -26,7 +14,7 @@ export interface User {
 /** Fired when the API answers 401 mid-session, so the auth gate can ask for sign-in. */
 export const AUTH_EXPIRED_EVENT = "imageopt:auth-expired";
 
-function noteAuthFailure(status: number) {
+export function noteAuthFailure(status: number) {
   if (status === 401 && typeof window !== "undefined") {
     window.dispatchEvent(new Event(AUTH_EXPIRED_EVENT));
   }
@@ -214,60 +202,6 @@ export interface VideoOptions {
   codec: VideoCodec;
   width: number | null;
   mute: boolean;
-}
-
-/**
- * Videos run to gigabytes, so the upload itself needs a progress bar. `fetch` exposes
- * no upload progress events — XHR is the only way to get them.
- */
-export function uploadVideos(
-  files: File[],
-  opts: VideoOptions,
-  onUploadProgress?: (percent: number) => void
-): Promise<VideoUploadResponse> {
-  const params = new URLSearchParams({
-    preset: opts.preset,
-    codec: opts.codec,
-    mute: String(opts.mute),
-  });
-  if (opts.width) params.set("width", String(opts.width));
-
-  const body = new FormData();
-  files.forEach((f) => body.append("files", f));
-
-  return new Promise((resolve, reject) => {
-    const xhr = new XMLHttpRequest();
-    xhr.open("POST", `${UPLOAD_BASE}/video/upload?${params}`);
-    // Session cookie; the upload host must sit under the same parent domain as the API
-    xhr.withCredentials = true;
-
-    xhr.upload.onprogress = (e) => {
-      if (e.lengthComputable && onUploadProgress) {
-        onUploadProgress(Math.round((e.loaded / e.total) * 100));
-      }
-    };
-
-    xhr.onload = () => {
-      noteAuthFailure(xhr.status);
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(xhr.responseText);
-      } catch {
-        reject(new Error(`Upload failed (${xhr.status})`));
-        return;
-      }
-      if (xhr.status >= 200 && xhr.status < 300) {
-        resolve(parsed as VideoUploadResponse);
-      } else {
-        const detail = (parsed as { detail?: string })?.detail;
-        reject(new Error(detail ?? `Upload failed (${xhr.status})`));
-      }
-    };
-
-    xhr.onerror = () => reject(new Error("Network error during upload"));
-    xhr.onabort = () => reject(new Error("Upload cancelled"));
-    xhr.send(body);
-  });
 }
 
 export async function getVideoStatus(jobId: string): Promise<VideoJob> {

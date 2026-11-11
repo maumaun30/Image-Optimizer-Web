@@ -266,17 +266,25 @@ export function CompressButton({
   );
 }
 
-/** Upload progress for big server-bound files (video). */
+/**
+ * Upload progress for big server-bound files (video). Uploads are resumable: the
+ * copy tells people a dropped connection or closed tab isn't fatal.
+ */
 export function UploadProgress({
   label,
-  percent,
+  sentBytes,
   totalBytes,
+  resumedBytes,
+  onCancel,
 }: {
   label: string;
-  percent: number;
+  sentBytes: number;
   totalBytes: number;
+  /** Bytes already on the server from an earlier, interrupted attempt. */
+  resumedBytes?: number | null;
+  onCancel?: () => void;
 }) {
-  const sent = Math.round((percent / 100) * totalBytes);
+  const percent = totalBytes ? Math.min(100, Math.floor((sentBytes / totalBytes) * 100)) : 0;
   return (
     <div className="bg-card border-border flex flex-col gap-2.5 rounded-xl border p-4">
       <div className="tabular flex items-baseline justify-between gap-3">
@@ -296,14 +304,27 @@ export function UploadProgress({
           style={{ width: `${percent}%` }}
         />
       </div>
-      <div className="tabular text-muted-foreground flex justify-between gap-3 text-xs">
+      <div className="tabular text-muted-foreground flex items-center justify-between gap-3 text-xs">
         <span>
           {percent >= 100
-            ? "Upload complete — the server is saving the file…"
-            : `${fmtBytes(sent)} of ${fmtBytes(totalBytes)} sent`}
+            ? "Upload complete — starting the encode…"
+            : `${fmtBytes(sentBytes)} of ${fmtBytes(totalBytes)} sent`}
         </span>
-        <span className="hidden sm:inline">Keep this tab open</span>
+        {onCancel && percent < 100 && (
+          <button
+            type="button"
+            onClick={onCancel}
+            className="text-foreground -my-2 min-h-11 px-1 font-medium underline underline-offset-3 sm:min-h-0"
+          >
+            Cancel
+          </button>
+        )}
       </div>
+      <p className="text-muted-foreground m-0 text-xs leading-[17px]" aria-live="polite">
+        {resumedBytes
+          ? `Resumed — ${fmtBytes(resumedBytes)} was already on the server.`
+          : "Connection drops are retried automatically. If you close this tab, pick the same file with the same options to resume."}
+      </p>
     </div>
   );
 }
