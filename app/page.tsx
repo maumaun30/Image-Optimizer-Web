@@ -11,8 +11,9 @@ import { CompressButton, ErrorBanner, OptionsCard, QualitySlider, Segmented, Uni
 import { DropZone } from "@/components/tool/drop-zone";
 import { JobQueue } from "@/components/tool/job-queue";
 import { ToolLayout } from "@/components/tool/tool-layout";
-import { canDownload, noteFor, type QueueItem } from "@/components/tool/types";
+import { canDownload, GONE_MESSAGE, noteFor, type QueueItem } from "@/components/tool/types";
 import { useEncodingFlag } from "@/components/tool/use-encoding-flag";
+import { useJobPoller } from "@/components/tool/use-job-poller";
 
 const TERMINAL: Set<JobStatus> = new Set(["ready", "downloaded", "failed", "expired"]);
 
@@ -33,28 +34,22 @@ export default function Home() {
   const [jobs, setJobs] = useState<Job[]>([]);
   const [error, setError] = useState<string | null>(null);
 
-  const pollers = useRef<Map<string, ReturnType<typeof setInterval>>>(new Map());
   /** Output of locally-compressed jobs, held until the user downloads it. */
   const blobs = useRef<Map<string, LocalResult>>(new Map());
 
   useEncodingFlag(jobs.some((j) => j.local && j.status === "processing"));
 
-  const startPolling = useCallback((jobId: string) => {
-    const timer = setInterval(async () => {
-      try {
-        const updated = await getStatus(jobId);
-        setJobs((prev) => prev.map((j) => (j.id === jobId ? updated : j)));
-        if (TERMINAL.has(updated.status)) {
-          clearInterval(timer);
-          pollers.current.delete(jobId);
-        }
-      } catch {
-        clearInterval(timer);
-        pollers.current.delete(jobId);
-      }
-    }, 2000);
-    pollers.current.set(jobId, timer);
-  }, []);
+  const { start: startPolling, stale } = useJobPoller<Job>({
+    fetchStatus: getStatus,
+    onUpdate: (id, updated) => setJobs((prev) => prev.map((j) => (j.id === id ? updated : j))),
+    isDone: (j) => TERMINAL.has(j.status),
+    onGone: (id) =>
+      setJobs((prev) =>
+        prev.map((j) =>
+          j.id === id ? { ...j, status: "failed" as JobStatus, error_message: GONE_MESSAGE } : j
+        )
+      ),
+  });
 
   const sendToServer = useCallback(
     async (files: File[], w: number | null) => {
@@ -185,10 +180,10 @@ export default function Home() {
         processedBytes: j.processed_size_bytes,
         savingsPercent: j.savings_percent,
         local: j.local,
-        note: noteFor(j),
+        note: noteFor(j, stale.has(j.id)),
         canDownload: canDownload(j),
       })),
-    [jobs]
+    [jobs, stale]
   );
 
   const byId = (id: string) => jobs.find((j) => j.id === id);

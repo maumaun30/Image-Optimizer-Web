@@ -28,7 +28,8 @@ import {
 import { DropZone } from "@/components/tool/drop-zone";
 import { JobQueue } from "@/components/tool/job-queue";
 import { ToolLayout } from "@/components/tool/tool-layout";
-import { canDownload, noteFor, type QueueItem } from "@/components/tool/types";
+import { canDownload, GONE_MESSAGE, noteFor, type QueueItem } from "@/components/tool/types";
+import { useJobPoller } from "@/components/tool/use-job-poller";
 import { useEncodingFlag } from "@/components/tool/use-encoding-flag";
 
 const TERMINAL: Set<JobStatus> = new Set(["ready", "downloaded", "failed", "expired"]);
@@ -84,7 +85,6 @@ export default function VideoPage() {
   const [etas, setEtas] = useState<Record<string, number>>({});
   const [error, setError] = useState<string | null>(null);
 
-  const pollers = useRef<Map<string, ReturnType<typeof setInterval>>>(new Map());
   // First moment a job reported real progress, used to extrapolate a finish time
   const encodeStart = useRef<Map<string, number>>(new Map());
   /** Output of locally-encoded jobs, held until the user downloads it. */
@@ -92,36 +92,32 @@ export default function VideoPage() {
 
   useEncodingFlag(jobs.some((j) => j.local && j.status === "processing"));
 
-  const startPolling = useCallback((jobId: string) => {
-    const timer = setInterval(async () => {
-      try {
-        const updated = await getVideoStatus(jobId);
-        setJobs((prev) => prev.map((j) => (j.id === jobId ? updated : j)));
+  const { start: startPolling, stale } = useJobPoller<VideoJob>({
+    fetchStatus: getVideoStatus,
+    onUpdate: (jobId, updated) => {
+      setJobs((prev) => prev.map((j) => (j.id === jobId ? updated : j)));
 
-        // Linear extrapolation from how long the encode has taken to reach this point
-        if (updated.status === "processing" && updated.progress_percent > 0) {
-          const started = encodeStart.current.get(jobId);
-          if (started == null) {
-            encodeStart.current.set(jobId, Date.now());
-          } else {
-            const elapsed = (Date.now() - started) / 1000;
-            const remaining = (elapsed / updated.progress_percent) * (100 - updated.progress_percent);
-            setEtas((p) => ({ ...p, [jobId]: remaining }));
-          }
+      // Linear extrapolation from how long the encode has taken to reach this point
+      if (updated.status === "processing" && updated.progress_percent > 0) {
+        const started = encodeStart.current.get(jobId);
+        if (started == null) {
+          encodeStart.current.set(jobId, Date.now());
+        } else {
+          const elapsed = (Date.now() - started) / 1000;
+          const remaining = (elapsed / updated.progress_percent) * (100 - updated.progress_percent);
+          setEtas((p) => ({ ...p, [jobId]: remaining }));
         }
-
-        if (TERMINAL.has(updated.status)) {
-          clearInterval(timer);
-          pollers.current.delete(jobId);
-          encodeStart.current.delete(jobId);
-        }
-      } catch {
-        clearInterval(timer);
-        pollers.current.delete(jobId);
       }
-    }, 2000);
-    pollers.current.set(jobId, timer);
-  }, []);
+      if (TERMINAL.has(updated.status)) encodeStart.current.delete(jobId);
+    },
+    isDone: (j) => TERMINAL.has(j.status),
+    onGone: (jobId) =>
+      setJobs((prev) =>
+        prev.map((j) =>
+          j.id === jobId ? { ...j, status: "failed" as JobStatus, error_message: GONE_MESSAGE } : j
+        )
+      ),
+  });
 
   const sendToServer = useCallback(
     async (files: File[], w: number | null) => {
@@ -295,12 +291,12 @@ export default function VideoPage() {
           savingsPercent: j.savings_percent,
           local: j.local,
           meta,
-          note: noteFor(j),
+          note: noteFor(j, stale.has(j.id)),
           progress: { percent: j.progress_percent, eta: etas[j.id] ?? null },
           canDownload: canDownload(j),
         };
       }),
-    [jobs, etas]
+    [jobs, etas, stale]
   );
 
   const uploadingRemote = uploading && remote.count > 0;

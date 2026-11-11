@@ -23,13 +23,22 @@ export interface QueueItem {
   canDownload: boolean;
 }
 
-/** Note for a row from the fields every job type shares. */
-export function noteFor(job: {
-  status: JobStatus;
-  error_message: string | null;
-  local?: boolean;
-  fallback_reason?: string;
-}): QueueItem["note"] {
+/**
+ * Note for a row from the fields every job type shares. `unreachable`: status checks
+ * for this job have been failing for a while (see useJobPoller).
+ */
+export function noteFor(
+  job: {
+    status: JobStatus;
+    error_message: string | null;
+    local?: boolean;
+    fallback_reason?: string;
+  },
+  unreachable = false
+): QueueItem["note"] {
+  if (unreachable && (job.status === "pending" || job.status === "processing")) {
+    return { kind: "warning", text: "Can’t reach the server — still trying. Your file is safe." };
+  }
   if (job.status === "failed" && job.error_message) {
     return { kind: "error", text: job.error_message };
   }
@@ -53,3 +62,6 @@ export function noteFor(job: {
 export function canDownload(job: { status: JobStatus; local?: boolean }): boolean {
   return job.status === "ready" || (job.status === "downloaded" && !job.local);
 }
+
+/** Shown when the server answers 404 for a job it created (expired and purged). */
+export const GONE_MESSAGE = "This job no longer exists on the server. Compress the file again.";

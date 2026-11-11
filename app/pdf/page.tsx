@@ -2,7 +2,7 @@
 
 import { AnimatePresence } from "motion/react";
 import { FileText } from "lucide-react";
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useMemo, useState } from "react";
 import {
   CompressionLevel,
   getPdfStatus,
@@ -16,7 +16,8 @@ import { CompressButton, ErrorBanner, OptionsCard, RadioCards } from "@/componen
 import { DropZone } from "@/components/tool/drop-zone";
 import { JobQueue } from "@/components/tool/job-queue";
 import { ToolLayout } from "@/components/tool/tool-layout";
-import { canDownload, noteFor, type QueueItem } from "@/components/tool/types";
+import { canDownload, GONE_MESSAGE, noteFor, type QueueItem } from "@/components/tool/types";
+import { useJobPoller } from "@/components/tool/use-job-poller";
 
 const TERMINAL: Set<JobStatus> = new Set(["ready", "downloaded", "failed", "expired"]);
 
@@ -36,24 +37,18 @@ export default function PdfPage() {
   const [jobs, setJobs] = useState<PdfJob[]>([]);
   const [error, setError] = useState<string | null>(null);
 
-  const pollers = useRef<Map<string, ReturnType<typeof setInterval>>>(new Map());
 
-  const startPolling = useCallback((jobId: string) => {
-    const timer = setInterval(async () => {
-      try {
-        const updated = await getPdfStatus(jobId);
-        setJobs((prev) => prev.map((j) => (j.id === jobId ? updated : j)));
-        if (TERMINAL.has(updated.status)) {
-          clearInterval(timer);
-          pollers.current.delete(jobId);
-        }
-      } catch {
-        clearInterval(timer);
-        pollers.current.delete(jobId);
-      }
-    }, 2000);
-    pollers.current.set(jobId, timer);
-  }, []);
+  const { start: startPolling, stale } = useJobPoller<PdfJob>({
+    fetchStatus: getPdfStatus,
+    onUpdate: (id, updated) => setJobs((prev) => prev.map((j) => (j.id === id ? updated : j))),
+    isDone: (j) => TERMINAL.has(j.status),
+    onGone: (id) =>
+      setJobs((prev) =>
+        prev.map((j) =>
+          j.id === id ? { ...j, status: "failed" as JobStatus, error_message: GONE_MESSAGE } : j
+        )
+      ),
+  });
 
   const handleUpload = async () => {
     if (!pending.length) return;
@@ -90,10 +85,10 @@ export default function PdfPage() {
         // PDFs always compress on the server
         local: false,
         meta: LEVELS.find((l) => l.value === j.compression_level)?.title,
-        note: noteFor(j),
+        note: noteFor(j, stale.has(j.id)),
         canDownload: canDownload(j),
       })),
-    [jobs]
+    [jobs, stale]
   );
 
   return (
