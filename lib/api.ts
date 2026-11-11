@@ -32,6 +32,17 @@ function noteAuthFailure(status: number) {
   }
 }
 
+/** A non-2xx API response; `status` lets callers tell auth, gone and transient apart. */
+export class ApiError extends Error {
+  constructor(
+    message: string,
+    readonly status: number
+  ) {
+    super(message);
+    this.name = "ApiError";
+  }
+}
+
 /** `fetch` against the API with the session cookie attached. */
 async function apiFetch(url: string, init?: RequestInit): Promise<Response> {
   const res = await fetch(url, { ...init, credentials: "include" });
@@ -104,7 +115,7 @@ export async function uploadImages(
 
 export async function getStatus(jobId: string): Promise<Job> {
   const res = await apiFetch(`${API_BASE}/images/status/${jobId}`);
-  if (!res.ok) throw new Error(`Status check failed (${res.status})`);
+  if (!res.ok) throw new ApiError(`Status check failed (${res.status})`, res.status);
   return res.json();
 }
 
@@ -154,7 +165,7 @@ export async function uploadPdfs(
 
 export async function getPdfStatus(jobId: string): Promise<PdfJob> {
   const res = await apiFetch(`${API_BASE}/pdf/status/${jobId}`);
-  if (!res.ok) throw new Error(`Status check failed (${res.status})`);
+  if (!res.ok) throw new ApiError(`Status check failed (${res.status})`, res.status);
   return res.json();
 }
 
@@ -261,7 +272,7 @@ export function uploadVideos(
 
 export async function getVideoStatus(jobId: string): Promise<VideoJob> {
   const res = await apiFetch(`${API_BASE}/video/status/${jobId}`);
-  if (!res.ok) throw new Error(`Status check failed (${res.status})`);
+  if (!res.ok) throw new ApiError(`Status check failed (${res.status})`, res.status);
   return res.json();
 }
 
